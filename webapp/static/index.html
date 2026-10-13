@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Local web client for the Customer Crypto gRPC educational demo">
+  <title>Customer Crypto Console</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Customer Crypto Console home">
+      <span class="brand-mark" aria-hidden="true">CC</span>
+      <span>
+        <strong>Customer Crypto</strong>
+        <small>Local access console</small>
+      </span>
+    </a>
+    <div class="service-state" id="service-state" role="status">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="service-state-label">Connecting</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">Educational threshold-encryption demo</p>
+        <h1 id="page-title">Act as a customer or back-office user.</h1>
+        <p class="lede">Read every record to see the ACL in action. Customer owners can update their own record; each update creates a new encrypted version with a fresh data-encryption key.</p>
+      </div>
+      <aside class="demo-warning">
+        <strong>Local demo identity switcher</strong>
+        <p>Selecting a user loads that identity’s local credential file. This is deliberate impersonation for testing, not a production sign-in flow.</p>
+      </aside>
+    </section>
+
+    <section class="actor-panel" aria-labelledby="actor-heading">
+      <div>
+        <p class="section-index">01 / Identity</p>
+        <h2 id="actor-heading">Choose who you are acting as</h2>
+      </div>
+      <div class="actor-controls">
+        <label for="identity-select">Demo identity</label>
+        <div class="select-row">
+          <select id="identity-select" disabled>
+            <option>Loading identities…</option>
+          </select>
+          <span class="role-chip" id="role-chip">—</span>
+          <button class="button secondary" id="read-all" type="button" disabled>Read all records</button>
+        </div>
+        <p class="permission-summary" id="permission-summary">Waiting for the local REST service.</p>
+      </div>
+    </section>
+
+    <section class="records-section" aria-labelledby="records-heading">
+      <div class="section-heading">
+        <div>
+          <p class="section-index">02 / Customer records</p>
+          <h2 id="records-heading">Access and update encrypted data</h2>
+        </div>
+        <p>Denied reads remain available as test actions so the server-side ACL can be observed.</p>
+      </div>
+      <div class="record-grid" id="record-grid" aria-live="polite"></div>
+    </section>
+
+    <section class="activity-section" aria-labelledby="activity-heading">
+      <div class="section-heading">
+        <div>
+          <p class="section-index">03 / Activity</p>
+          <h2 id="activity-heading">Client console</h2>
+        </div>
+        <button class="text-button" id="clear-activity" type="button">Clear activity</button>
+      </div>
+      <ol class="activity-log" id="activity-log" aria-live="polite"></ol>
+      <p class="console-note">The same request details are written to the browser developer console. The REST process logs structured request outcomes in its terminal.</p>
+    </section>
+  </main>
+
+  <template id="record-template">
+    <article class="record-card">
+      <header class="record-header">
+        <div>
+          <p class="record-label">Customer record</p>
+          <h3 class="record-id"></h3>
+        </div>
+        <span class="access-chip"></span>
+      </header>
+      <div class="record-state">
+        <p class="state-title">Not loaded</p>
+        <p class="state-detail">Use the button below to request this encrypted record.</p>
+      </div>
+      <dl class="record-meta" hidden>
+        <div><dt>Version</dt><dd class="record-version"></dd></div>
+        <div><dt>Customer</dt><dd class="record-name"></dd></div>
+      </dl>
+      <form class="record-form" hidden>
+        <div class="field-grid">
+          <label>Name<input name="name" autocomplete="off"></label>
+          <label>Email<input name="email" type="email" autocomplete="off"></label>
+          <label>Phone<input name="phone" autocomplete="off"></label>
+          <label>City<input name="city" autocomplete="off"></label>
+          <label class="wide">Notes<textarea name="notes" rows="3"></textarea></label>
+        </div>
+        <p class="form-note"></p>
+        <button class="button primary save-button" type="submit">Save encrypted update</button>
+      </form>
+      <button class="button record-read" type="button">Read record</button>
+    </article>
+  </template>
+
+  <noscript>This web client requires JavaScript.</noscript>
+</body>
+</html>
