@@ -21,6 +21,7 @@ VERSION ?= 0
 FIELD ?= city
 VALUE ?= Gothenburg
 TARGET ?= backoffice1
+BYPASS_READ_AUTHORIZATION ?= false
 
 .PHONY: help deps test vet check check-scripts check-js integration demo \
 	reset bootstrap server seed web client update revoke jobs rotate \
@@ -52,6 +53,7 @@ help:
 	@printf '\nCommon overrides:\n'
 	@printf '  DB=%s IDENTITIES=%s GRPC_ADDR=%s WEB_ADDR=%s\n' "$(DB)" "$(IDENTITIES)" "$(GRPC_ADDR)" "$(WEB_ADDR)"
 	@printf '  IDENTITY=%s OBJECT=%s VERSION=%s FIELD=%s VALUE=%s TARGET=%s\n' "$(IDENTITY)" "$(OBJECT)" "$(VERSION)" "$(FIELD)" "$(VALUE)" "$(TARGET)"
+	@printf '  BYPASS_READ_AUTHORIZATION=%s\n' "$(BYPASS_READ_AUTHORIZATION)"
 
 deps:
 	$(GO) mod tidy
@@ -123,7 +125,11 @@ rest-config:
 	printf '\n'
 
 rest-read:
-	$(CURL) -sS -H 'Accept: application/json' -H "X-Demo-Identity: $(IDENTITY)" "$(REST_URL)/api/v1/records/$(OBJECT)"
+	headers=(-H 'Accept: application/json' -H "X-Demo-Identity: $(IDENTITY)")
+	if [[ "$(BYPASS_READ_AUTHORIZATION)" == "true" ]]; then
+		headers+=(-H 'X-Demo-Read-Authorization: disabled')
+	fi
+	$(CURL) -sS "$${headers[@]}" "$(REST_URL)/api/v1/records/$(OBJECT)"
 	printf '\n'
 
 rest-update:

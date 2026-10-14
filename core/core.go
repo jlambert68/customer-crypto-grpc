@@ -31,6 +31,13 @@ type Client struct {
 	Secret *big.Int
 	Public Point
 }
+type DecryptionTrace struct {
+	ServerPartial    Point
+	ClientPartial    Point
+	CombinedShared   Point
+	KeyEncryptionKey []byte
+	DEK              []byte
+}
 
 func Scalar() (*big.Int, error) {
 	n, e := rand.Int(rand.Reader, new(big.Int).Sub(order, big.NewInt(1)))
@@ -152,22 +159,39 @@ func Encrypt(id string, version uint64, plain []byte, recipients map[string]Poin
 	return o, nil
 }
 func Final(o Object, c Client, part Point) ([]byte, error) {
+	plain, _, e := FinalWithDEK(o, c, part)
+	return plain, e
+}
+func FinalWithDEK(o Object, c Client, part Point) ([]byte, []byte, error) {
+	plain, trace, e := FinalWithTrace(o, c, part)
+	return plain, trace.DEK, e
+}
+func FinalWithTrace(o Object, c Client, part Point) ([]byte, DecryptionTrace, error) {
+	trace := DecryptionTrace{ServerPartial: part}
 	env, ok := o.Envelopes[c.ID]
 	if !ok {
-		return nil, errors.New("missing envelope")
+		return nil, trace, errors.New("missing envelope")
 	}
 	cp, e := Mul(env.R, c.Secret)
 	if e != nil {
-		return nil, e
+		return nil, trace, e
 	}
+	trace.ClientPartial = cp
 	shared, e := Add(cp, part)
 	if e != nil {
-		return nil, e
+		return nil, trace, e
 	}
+	trace.CombinedShared = shared
 	ad := AAD(o.ID, o.Version, c.ID)
-	dek, e := Open(KDF(shared, ad), env.Nonce, env.Wrapped, ad)
+	trace.KeyEncryptionKey = KDF(shared, ad)
+	dek, e := Open(trace.KeyEncryptionKey, env.Nonce, env.Wrapped, ad)
 	if e != nil {
-		return nil, e
+		return nil, trace, e
 	}
-	return Open(dek, o.Nonce, o.Ciphertext, AAD(o.ID, o.Version, ""))
+	trace.DEK = dek
+	plain, e := Open(dek, o.Nonce, o.Ciphertext, AAD(o.ID, o.Version, ""))
+	if e != nil {
+		return nil, trace, e
+	}
+	return plain, trace, nil
 }

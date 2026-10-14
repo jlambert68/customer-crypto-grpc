@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestTwoSharesAndCrossClient(t *testing.T) {
 	s1, _ := NewClient("s1")
@@ -17,14 +20,20 @@ func TestTwoSharesAndCrossClient(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	got, e := Final(obj, c1, part1)
+	got, trace1, e := FinalWithTrace(obj, c1, part1)
 	if e != nil || string(got) != "secret" {
 		t.Fatal(e)
 	}
+	if !Valid(trace1.ServerPartial) || !Valid(trace1.ClientPartial) || !Valid(trace1.CombinedShared) || len(trace1.KeyEncryptionKey) != 32 {
+		t.Fatal("decryption trace must contain the three valid points and a 256-bit KEK")
+	}
 	part2, _ := Mul(obj.Envelopes["c2"].R, s2.Secret)
-	got, e = Final(obj, c2, part2)
+	got, dek2, e := FinalWithDEK(obj, c2, part2)
 	if e != nil || string(got) != "secret" {
 		t.Fatal(e)
+	}
+	if len(trace1.DEK) != 32 || !bytes.Equal(trace1.DEK, dek2) {
+		t.Fatal("every recipient envelope must unwrap the same 256-bit DEK")
 	}
 	obj.Envelopes["c2"] = obj.Envelopes["c1"]
 	if _, e = Final(obj, c2, part1); e == nil {

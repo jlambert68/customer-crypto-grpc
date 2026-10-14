@@ -27,12 +27,12 @@
     <section class="hero" aria-labelledby="page-title">
       <div>
         <p class="eyebrow">Educational threshold-encryption demo</p>
-        <h1 id="page-title">Act as a customer or back-office user.</h1>
-        <p class="lede">Read every record to see the ACL in action. Customer owners can update their own record; each update creates a new encrypted version with a fresh data-encryption key.</p>
+        <h1 id="page-title">Act as a customer, back-office user, or rotation service.</h1>
+        <p class="lede">Compare server authorization with cryptographic access. Select the privileged rotation identity to see why it can decrypt every record, or release ciphertext to a wrong identity and see the missing recipient envelope keep the customer data locked.</p>
       </div>
       <aside class="demo-warning">
         <strong>Local demo identity switcher</strong>
-        <p>Selecting a user loads that identity’s local credential file. This is deliberate impersonation for testing, not a production sign-in flow.</p>
+        <p>Selecting an identity loads its local credential file. This includes the highly privileged rotation service and is deliberate impersonation for testing, not a production sign-in flow.</p>
       </aside>
     </section>
 
@@ -51,8 +51,46 @@
           <button class="button secondary" id="read-all" type="button" disabled>Read all records</button>
         </div>
         <p class="permission-summary" id="permission-summary">Waiting for the local REST service.</p>
+        <label class="authorization-toggle" for="authorization-toggle">
+          <input id="authorization-toggle" type="checkbox" disabled>
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+          <span class="toggle-copy">
+            <strong>Disable server read authorization</strong>
+            <small>Demo only. Authentication and every write check stay enabled.</small>
+          </span>
+        </label>
       </div>
     </section>
+
+    <aside class="rotation-purpose" aria-labelledby="rotation-purpose-heading">
+      <div class="rotation-purpose-intro">
+        <span class="rotation-purpose-tag">Privileged maintenance client</span>
+        <h3 id="rotation-purpose-heading">What is the rotation service used for?</h3>
+        <p>Rotation is a separate trusted client process, not part of the gRPC server. It creates the initial encrypted demo records and replaces a record’s encryption after an identity is revoked.</p>
+      </div>
+      <ol class="rotation-purpose-flow">
+        <li>
+          <span>1</span>
+          <div><strong>Revoke access</strong><p>The server disables the identity and queues every affected customer record.</p></div>
+        </li>
+        <li>
+          <span>2</span>
+          <div><strong>Decrypt locally</strong><p>Rotation uses its own recipient envelope to decrypt the latest version inside the rotation process.</p></div>
+        </li>
+        <li>
+          <span>3</span>
+          <div><strong>Generate fresh encryption</strong><p>It creates a new random DEK, ciphertext, and envelopes for the remaining active recipients.</p></div>
+        </li>
+        <li>
+          <span>4</span>
+          <div><strong>Upload the next version</strong><p>The server validates the version and recipient set, then stores only the new encrypted object.</p></div>
+        </li>
+      </ol>
+      <div class="rotation-purpose-notes">
+        <p><strong>What rotates:</strong> the object DEK, ciphertext, nonce, and recipient envelopes. The long-lived server and client scalar shares do not rotate in this workflow.</p>
+        <p><strong>Why it is trusted:</strong> the rotation process temporarily sees plaintext and the DEK. Selecting rotation in this browser only demonstrates its read/decrypt capability; actual jobs run with <code>make rotate</code>.</p>
+      </div>
+    </aside>
 
     <section class="records-section" aria-labelledby="records-heading">
       <div class="section-heading">
@@ -60,15 +98,398 @@
           <p class="section-index">02 / Customer records</p>
           <h2 id="records-heading">Access and update encrypted data</h2>
         </div>
-        <p>Denied reads remain available as test actions so the server-side ACL can be observed.</p>
+        <p id="records-explainer">Denied reads remain available as test actions so the server-side ACL can be observed.</p>
       </div>
       <div class="record-grid" id="record-grid" aria-live="polite"></div>
+    </section>
+
+    <section class="envelope-section" aria-labelledby="envelope-heading">
+      <div class="section-heading">
+        <div>
+          <p class="section-index">03 / Envelope visualizer</p>
+          <h2 id="envelope-heading">One locked record, several named envelopes</h2>
+        </div>
+        <p>Think of the ciphertext as one locked box. The DEK is the box key. Each envelope holds an encrypted copy of that same key for exactly one recipient.</p>
+      </div>
+
+      <div class="envelope-core-idea" role="img" aria-label="One encrypted record is stored beside several recipient-specific envelopes containing encrypted copies of the same data key">
+        <div class="envelope-idea-card">
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M11 20h26v20H11zM17 20v-5a7 7 0 0 1 14 0v5M24 28v5"/></svg>
+          <div><strong>One locked box</strong><span>The customer record is encrypted once.</span></div>
+        </div>
+        <span class="envelope-idea-plus" aria-hidden="true">+</span>
+        <div class="envelope-idea-card">
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 13h32v23H8zM9 15l15 12 15-12M9 35l11-11M39 35L28 24"/></svg>
+          <div><strong>Several named envelopes</strong><span>Each contains the same DEK, wrapped differently.</span></div>
+        </div>
+        <div class="envelope-key-rule">
+          <strong>An envelope never contains customer data.</strong>
+          <span>It contains only an encrypted DEK. The DEK is what can open the shared ciphertext.</span>
+        </div>
+      </div>
+
+      <div class="envelope-board">
+        <article class="envelope-stage envelope-write-stage">
+          <header>
+            <span class="envelope-stage-tag">When data is written</span>
+            <h3>Encrypt once, then wrap the DEK once per recipient</h3>
+            <p>The full record produces one ciphertext. The random object DEK is then protected separately for every identity that should be able to read it.</p>
+          </header>
+
+          <div class="envelope-seal-flow">
+            <div class="envelope-graphic-node plaintext-node">
+              <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M13 6h16l7 7v29H13zM29 6v8h7M18 22h13M18 28h13M18 34h9"/></svg>
+              <small>Readable input</small>
+              <strong>Customer JSON</strong>
+              <span>name · email · city · notes</span>
+            </div>
+            <div class="envelope-graphic-arrow">
+              <span>fresh random DEK</span>
+              <b aria-hidden="true">→</b>
+              <small>AES-256-GCM</small>
+            </div>
+            <div class="envelope-graphic-node ciphertext-node" id="envelope-record-node">
+              <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M10 18h28v24H10zM16 18v-6a8 8 0 0 1 16 0v6M24 27v6"/></svg>
+              <small>Shared locked box</small>
+              <strong id="envelope-record-label">Encrypted record</strong>
+              <span id="envelope-ciphertext-label">Read a record to load real values.</span>
+            </div>
+          </div>
+
+          <div class="envelope-wrap-map">
+            <div class="envelope-dek-hub" id="envelope-dek-hub">
+              <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="16" cy="24" r="8"/><path d="M24 24h18M34 24v6M39 24v4"/></svg>
+              <small>One object key</small>
+              <strong>Same DEK</strong>
+              <code id="envelope-dek-hint">hidden until a valid envelope opens</code>
+            </div>
+            <div class="envelope-branch" aria-hidden="true">
+              <span>encrypted separately</span>
+              <b>→</b>
+            </div>
+            <div class="envelope-recipient-list" id="envelope-recipients" aria-live="polite">
+              <div class="envelope-recipient placeholder">
+                <span class="envelope-mini-icon" aria-hidden="true"></span>
+                <div><strong>Recipient envelopes appear here</strong><code>wrapped DEK</code><small>Read a record above.</small></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="envelope-database-shelf">
+            <svg viewBox="0 0 48 48" aria-hidden="true"><ellipse cx="24" cy="10" rx="16" ry="6"/><path d="M8 10v28c0 3 7 6 16 6s16-3 16-6V10M8 24c0 3 7 6 16 6s16-3 16-6M8 37c0 3 7 6 16 6s16-3 16-6"/></svg>
+            <div><strong>What SQLite stores</strong><span id="envelope-store-summary">One ciphertext + a map of named encrypted-DEK envelopes.</span></div>
+          </div>
+        </article>
+
+        <article class="envelope-stage envelope-read-stage">
+          <header>
+            <span class="envelope-stage-tag">When one identity reads</span>
+            <h3>Follow only the matching envelope</h3>
+            <p>The selected identity cannot open somebody else’s envelope. Its name must exist in the envelope map before key recovery can begin.</p>
+          </header>
+
+          <ol class="envelope-unlock-path">
+            <li class="envelope-unlock-node waiting" id="envelope-actor-node">
+              <span class="envelope-unlock-number">1</span>
+              <div><small>Selected identity</small><strong>Choose an identity</strong><span>No request yet.</span></div>
+            </li>
+            <li class="envelope-unlock-arrow"><span>Find an envelope with the same name</span><b aria-hidden="true">↓</b></li>
+            <li class="envelope-unlock-node waiting" id="envelope-match-node">
+              <span class="envelope-unlock-number">2</span>
+              <div><small>Recipient lookup</small><strong>Matching envelope?</strong><span>Waiting for ciphertext.</span></div>
+            </li>
+            <li class="envelope-unlock-arrow"><span>Server partial + client partial derive this recipient’s KEK</span><b aria-hidden="true">↓</b></li>
+            <li class="envelope-unlock-node waiting" id="envelope-kek-node">
+              <span class="envelope-unlock-number">3</span>
+              <div><small>Open one envelope</small><strong>Recover the DEK</strong><span>No KEK or DEK yet.</span></div>
+            </li>
+            <li class="envelope-unlock-arrow"><span>The recovered DEK opens the one shared ciphertext</span><b aria-hidden="true">↓</b></li>
+            <li class="envelope-unlock-node waiting" id="envelope-plaintext-node">
+              <span class="envelope-unlock-number">4</span>
+              <div><small>Final result</small><strong>Readable customer data</strong><span>Still encrypted.</span></div>
+            </li>
+          </ol>
+
+          <div class="envelope-outcome waiting" id="envelope-outcome" role="status">
+            <strong>Try it with a record</strong>
+            <span>Successful identities follow the green path. A wrong identity stops at “Matching envelope?”.</span>
+          </div>
+        </article>
+      </div>
+
+      <details class="envelope-technical">
+        <summary>Show the cryptographic names behind the picture</summary>
+        <div class="envelope-technical-grid">
+          <div><code>DEK</code><strong>Data-encryption key</strong><p>One random 256-bit key encrypts the complete customer JSON with AES-GCM.</p></div>
+          <div><code>Envelope</code><strong>R + nonce + wrapped DEK</strong><p>Recipient-specific metadata and an encrypted DEK. It contains no customer fields.</p></div>
+          <div><code>KEK</code><strong>Key-encryption key</strong><p>Derived from the combined server/client point. It opens only the selected recipient’s envelope.</p></div>
+          <div><code>Wrapped DEK</code><strong>AES-GCM ciphertext of the DEK</strong><p>Different bytes in every envelope, even though every valid envelope recovers the same DEK.</p></div>
+        </div>
+        <p class="envelope-technical-formula"><code>recipient envelope → KEK unwrap → DEK → decrypt shared ciphertext → plaintext</code></p>
+      </details>
+    </section>
+
+    <section class="process-section" aria-labelledby="process-heading">
+      <div class="section-heading">
+        <div>
+          <p class="section-index">04 / Live cryptographic process</p>
+          <h2 id="process-heading">Follow one request from ciphertext to plaintext</h2>
+        </div>
+        <p>Read a record above and this trace fills with the real values from that request. If access or encryption blocks the identity, the flow stops at the exact boundary that protected the data.</p>
+      </div>
+
+      <div class="boundary-legend" aria-label="Process boundary legend">
+        <span><i class="boundary-dot browser" aria-hidden="true"></i>Browser</span>
+        <span><i class="boundary-dot client" aria-hidden="true"></i>Client gateway</span>
+        <span><i class="boundary-dot server" aria-hidden="true"></i>gRPC server</span>
+        <span><i class="boundary-dot database" aria-hidden="true"></i>SQLite database</span>
+      </div>
+
+      <div class="process-safety-note">
+        <strong>The two private scalar shares never appear in this trace.</strong>
+        <p>The server uses its share only inside the server process. The selected client gateway uses its share only inside the client process. This local demo reveals derived points, KEK, and DEK so you can study how they relate.</p>
+      </div>
+
+      <ol class="process-flow" id="process-flow">
+        <li class="process-step waiting" id="process-request">
+          <div class="process-marker" aria-hidden="true">1</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip browser">Browser → client gateway</span>
+                <h3>Request a record as the selected identity</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>The browser sends only the selected demo identity and object ID. The gateway loads that identity’s bearer token and private share from its local file.</p>
+                <p class="process-formula">HTTP request → local identity credential → authenticated gRPC call</p>
+              </div>
+              <div class="process-evidence">
+                <span>Evidence from this request</span>
+                <p class="process-detail">Choose a record to begin.</p>
+                <pre class="process-value">No request yet.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+
+        <li class="process-step waiting" id="process-gate">
+          <div class="process-marker" aria-hidden="true">2</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip server">gRPC server</span>
+                <h3>Authenticate, then apply the read policy</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>The server checks the token and revocation state first. With authorization enabled it then checks the record grant. The demo toggle skips only that grant check.</p>
+                <p class="process-formula">token valid ∧ principal active ∧ (ACL granted ∨ demo bypass)</p>
+              </div>
+              <div class="process-evidence">
+                <span>Server decision</span>
+                <p class="process-detail">No authentication decision yet.</p>
+                <pre class="process-value">The flow can stop here before SQLite returns ciphertext.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+
+        <li class="process-step waiting" id="process-database">
+          <div class="process-marker" aria-hidden="true">3</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip database">SQLite → server → client</span>
+                <h3>Return the encrypted object</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>SQLite stores a record nonce, AES-GCM ciphertext, and one separately wrapped copy of the object DEK for each recipient. It does not store the customer fields as plaintext.</p>
+                <p class="process-formula">stored object = nonce + ciphertext + {recipient → envelope}</p>
+              </div>
+              <div class="process-evidence">
+                <span>Stored payload summary</span>
+                <p class="process-detail">No database row has been returned.</p>
+                <pre class="process-value">The full stored JSON appears in the evidence section below.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+
+        <li class="process-step waiting" id="process-server-share">
+          <div class="process-marker" aria-hidden="true">4</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip server">gRPC server</span>
+                <h3>Compute the server’s partial point</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>The client selects its envelope’s ephemeral point R. The server verifies that envelope and multiplies R by its private scalar share. It returns only the resulting point S.</p>
+                <p class="process-formula">S = x<sub>server</sub> × R &nbsp;·&nbsp; x<sub>server</sub> never leaves the server</p>
+              </div>
+              <div class="process-evidence">
+                <span>Server output</span>
+                <p class="process-detail">Waiting for a matching recipient envelope.</p>
+                <pre class="process-value">No partial point yet.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+
+        <li class="process-step waiting" id="process-client-combine">
+          <div class="process-marker" aria-hidden="true">5</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip client">Client gateway</span>
+                <h3>Add the client’s partial point</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>The gateway multiplies the same R by its own private scalar share, then adds both partial points. Neither private share crosses the process boundary.</p>
+                <p class="process-formula">C = x<sub>client</sub> × R &nbsp;·&nbsp; Z = S + C</p>
+              </div>
+              <div class="process-evidence">
+                <span>Client computation</span>
+                <p class="process-detail">No client point has been computed.</p>
+                <pre class="process-value">No combined shared point yet.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+
+        <li class="process-step waiting" id="process-unwrap">
+          <div class="process-marker" aria-hidden="true">6</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip client">Client gateway</span>
+                <h3>Derive a KEK and unwrap the object DEK</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>An HMAC-SHA-256 KDF turns the combined point into a key-encryption key (KEK). AES-GCM then opens this identity’s envelope and recovers the common data-encryption key (DEK).</p>
+                <p class="process-formula">KEK = KDF(Z, envelope AAD) &nbsp;·&nbsp; DEK = AES-GCM-Open(KEK, wrapped DEK)</p>
+              </div>
+              <div class="process-evidence">
+                <span>Envelope result · demo-only secret display</span>
+                <p class="process-detail">No envelope has been opened.</p>
+                <pre class="process-value">No KEK or DEK yet.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+
+        <li class="process-step waiting" id="process-plaintext">
+          <div class="process-marker" aria-hidden="true">7</div>
+          <article>
+            <header class="process-step-heading">
+              <div>
+                <span class="boundary-chip client">Client gateway → browser</span>
+                <h3>Decrypt and decode the customer data</h3>
+              </div>
+              <span class="process-status">Waiting</span>
+            </header>
+            <div class="process-step-content">
+              <div>
+                <p>The gateway uses the DEK, record nonce, ciphertext, and record AAD with AES-256-GCM. Only after authentication succeeds does it decode the JSON and send readable fields to the browser.</p>
+                <p class="process-formula">plaintext = AES-GCM-Open(DEK, record nonce, ciphertext, record AAD)</p>
+              </div>
+              <div class="process-evidence">
+                <span>Client output</span>
+                <p class="process-detail">No plaintext has been produced.</p>
+                <pre class="process-value">The server never receives this plaintext.</pre>
+              </div>
+            </div>
+          </article>
+        </li>
+      </ol>
+    </section>
+
+    <section class="inspection-section" aria-labelledby="inspection-heading">
+      <div class="section-heading">
+        <div>
+          <p class="section-index">05 / Request evidence</p>
+          <h2 id="inspection-heading">Inspect stored ciphertext and client plaintext</h2>
+        </div>
+        <p>The gRPC server never decrypts a customer record. It returns ciphertext and a server key-share result; the selected client gateway must combine that with its own secret share.</p>
+      </div>
+      <div class="comparison-grid">
+        <article class="inspection-card">
+          <div class="inspection-card-heading">
+            <div>
+              <p class="record-label">SQLite / objects.ciphertext</p>
+              <h3>1. Database stores</h3>
+            </div>
+            <span class="inspection-chip" id="database-status">Waiting</span>
+          </div>
+          <p class="inspection-note">The nonce, AES-GCM ciphertext, and recipient-specific wrapped DEKs are stored as JSON. The plaintext fields do not appear here.</p>
+          <pre id="database-output">Read a customer record to inspect its stored encrypted representation.</pre>
+        </article>
+        <article class="inspection-card">
+          <div class="inspection-card-heading">
+            <div>
+              <p class="record-label">Selected client gateway</p>
+              <h3>2. After client-side decryption</h3>
+            </div>
+            <span class="inspection-chip" id="decryption-status">Waiting</span>
+          </div>
+          <p class="inspection-note">If the selected identity has an envelope, the client combines both key shares and reveals plaintext. Without an envelope, this panel remains locked.</p>
+          <pre id="decryption-output">No decryption attempt yet.</pre>
+        </article>
+      </div>
+      <article class="key-material-card">
+        <div class="inspection-card-heading">
+          <div>
+            <p class="record-label">Recipient key envelopes</p>
+            <h3>3. Each party’s DEK view</h3>
+          </div>
+          <span class="inspection-chip" id="dek-status">Waiting</span>
+        </div>
+        <div class="key-warning">
+          <strong>One DEK, wrapped separately for every recipient.</strong>
+          <p>The wrapped values differ, but every valid envelope recovers the same 256-bit object DEK. Showing the unwrapped key is deliberately unsafe and exists only for this local educational demo.</p>
+        </div>
+        <div class="recovered-key">
+          <span>Recovered object DEK (hex)</span>
+          <code id="dek-value">Read a decryptable record to reveal the demo key.</code>
+        </div>
+        <div class="key-table-wrap">
+          <table class="key-table">
+            <thead>
+              <tr>
+                <th scope="col">Party</th>
+                <th scope="col">Wrapped DEK stored for party (hex)</th>
+                <th scope="col">Unwrapped object DEK (hex)</th>
+              </tr>
+            </thead>
+            <tbody id="dek-rows">
+              <tr><td colspan="3">No record selected.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
     </section>
 
     <section class="activity-section" aria-labelledby="activity-heading">
       <div class="section-heading">
         <div>
-          <p class="section-index">03 / Activity</p>
+          <p class="section-index">06 / Activity</p>
           <h2 id="activity-heading">Client console</h2>
         </div>
         <button class="text-button" id="clear-activity" type="button">Clear activity</button>
@@ -108,6 +529,17 @@
       </form>
       <button class="button record-read" type="button">Read record</button>
     </article>
+  </template>
+
+  <template id="envelope-recipient-template">
+    <div class="envelope-recipient">
+      <span class="envelope-mini-icon" aria-hidden="true"></span>
+      <div>
+        <strong class="envelope-recipient-name"></strong>
+        <code class="envelope-recipient-value"></code>
+        <small class="envelope-recipient-note"></small>
+      </div>
+    </div>
   </template>
 
   <noscript>This web client requires JavaScript.</noscript>

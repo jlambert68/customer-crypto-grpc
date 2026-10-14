@@ -21,9 +21,10 @@ type Pub struct {
 	Public []byte `json:"public"`
 }
 type Snapshot struct {
-	ID      string      `json:"id"`
-	Version uint64      `json:"version"`
-	Data    core.Object `json:"data"`
+	ID      string          `json:"id"`
+	Version uint64          `json:"version"`
+	Data    core.Object     `json:"data"`
+	Stored  json.RawMessage `json:"stored"`
 }
 type Job struct {
 	ID   string `json:"id"`
@@ -48,6 +49,8 @@ type ObjectArgs struct {
 type RevokeArgs struct {
 	ID string `json:"id"`
 }
+
+const ReadAuthorizationMetadata = "demo-read-authorization"
 
 func point(b []byte) (core.Point, error) {
 	x, y := elliptic.Unmarshal(elliptic.P256(), b)
@@ -80,7 +83,8 @@ func (s *Service) Call(ctx context.Context, req *protocol.Request) (*protocol.Re
 	if revoked {
 		return fail(errors.New("principal revoked"))
 	}
-	result, err := s.execute(req.Target, req.Payload, id, role, secret)
+	enforceReadAuthorization := !strings.EqualFold(strings.Join(md.Get(ReadAuthorizationMetadata), ""), "disabled")
+	result, err := s.execute(req.Target, req.Payload, id, role, secret, enforceReadAuthorization)
 	if err != nil {
 		return fail(err)
 	}
@@ -91,7 +95,7 @@ func (s *Service) Call(ctx context.Context, req *protocol.Request) (*protocol.Re
 	_ = s.Store.Exec(`INSERT INTO audit(principal_id,action,object_id) VALUES(?,?,?)`, id, req.Target, "")
 	return &protocol.Response{Payload: b}, nil
 }
-func (s *Service) execute(op string, raw []byte, id, role string, secret []byte) (any, error) {
+func (s *Service) execute(op string, raw []byte, id, role string, secret []byte, enforceReadAuthorization bool) (any, error) {
 	switch op {
 	case "pubs":
 		var a ObjectArgs
@@ -131,7 +135,7 @@ func (s *Service) execute(op string, raw []byte, id, role string, secret []byte)
 		if e := json.Unmarshal(raw, &a); e != nil {
 			return nil, e
 		}
-		if !s.Store.Authorized(id, a.Object) {
+		if enforceReadAuthorization && !s.Store.Authorized(id, a.Object) {
 			return nil, errors.New("access denied")
 		}
 		v := a.Version
@@ -150,13 +154,13 @@ func (s *Service) execute(op string, raw []byte, id, role string, secret []byte)
 		if e = json.Unmarshal(b, &obj); e != nil {
 			return nil, e
 		}
-		return Snapshot{a.Object, v, obj}, nil
+		return Snapshot{ID: a.Object, Version: v, Data: obj, Stored: json.RawMessage(append([]byte(nil), b...))}, nil
 	case "partial":
 		var a PartialArgs
 		if e := json.Unmarshal(raw, &a); e != nil {
 			return nil, e
 		}
-		if !s.Store.Authorized(id, a.Object) {
+		if enforceReadAuthorization && !s.Store.Authorized(id, a.Object) {
 			return nil, errors.New("access denied")
 		}
 		b, e := s.Store.Object(a.Object, a.Version)

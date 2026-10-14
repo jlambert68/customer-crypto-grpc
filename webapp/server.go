@@ -1,8 +1,11 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
+	"crypto/elliptic"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +17,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"example.com/customer-crypto-grpc-v2/agent"
+	"example.com/customer-crypto-grpc-v2/core"
 )
 
 //go:embed static/*
@@ -45,16 +50,68 @@ type server struct {
 }
 
 type recordResponse struct {
-	Actor     string         `json:"actor"`
-	ObjectID  string         `json:"object_id"`
-	Version   uint64         `json:"version"`
-	CanUpdate bool           `json:"can_update"`
-	Data      map[string]any `json:"data"`
+	Actor             string         `json:"actor"`
+	ObjectID          string         `json:"object_id"`
+	Version           uint64         `json:"version"`
+	CanUpdate         bool           `json:"can_update"`
+	AuthorizationMode string         `json:"authorization_mode"`
+	DatabaseStored    string         `json:"database_stored"`
+	Decrypted         bool           `json:"decrypted"`
+	DecryptionError   string         `json:"decryption_error,omitempty"`
+	Data              map[string]any `json:"data,omitempty"`
+	KeyMaterial       keyMaterial    `json:"key_material"`
+	ProcessTrace      processTrace   `json:"process_trace"`
+}
+
+type processTrace struct {
+	Status                 string   `json:"status"`
+	Operation              string   `json:"operation"`
+	Actor                  string   `json:"actor"`
+	ObjectID               string   `json:"object_id"`
+	Version                uint64   `json:"version"`
+	AuthorizationMode      string   `json:"authorization_mode"`
+	Authenticated          bool     `json:"authenticated"`
+	AuthorizationDecision  string   `json:"authorization_decision"`
+	DatabaseRead           bool     `json:"database_read"`
+	StoredJSONBytes        int      `json:"stored_json_bytes"`
+	CiphertextBytes        int      `json:"ciphertext_bytes"`
+	RecordNonceHex         string   `json:"record_nonce_hex"`
+	Recipients             []string `json:"recipients"`
+	EnvelopeFound          bool     `json:"envelope_found"`
+	EnvelopeRecipient      string   `json:"envelope_recipient,omitempty"`
+	EphemeralPointHex      string   `json:"ephemeral_point_hex,omitempty"`
+	WrapNonceHex           string   `json:"wrap_nonce_hex,omitempty"`
+	WrappedDEKHex          string   `json:"wrapped_dek_hex,omitempty"`
+	ServerPartialPointHex  string   `json:"server_partial_point_hex,omitempty"`
+	ClientPartialPointHex  string   `json:"client_partial_point_hex,omitempty"`
+	CombinedSharedPointHex string   `json:"combined_shared_point_hex,omitempty"`
+	EnvelopeAADHex         string   `json:"envelope_aad_hex,omitempty"`
+	KeyEncryptionKeyHex    string   `json:"key_encryption_key_hex,omitempty"`
+	DEKHex                 string   `json:"dek_hex,omitempty"`
+	RecordAADHex           string   `json:"record_aad_hex,omitempty"`
+	PlaintextBytes         int      `json:"plaintext_bytes,omitempty"`
+	StopReason             string   `json:"stop_reason,omitempty"`
+}
+
+type keyMaterial struct {
+	DEKHex        string              `json:"dek_hex,omitempty"`
+	RecoveredBy   string              `json:"recovered_by,omitempty"`
+	RecipientDEKs []recipientEnvelope `json:"recipient_envelopes"`
+}
+
+type recipientEnvelope struct {
+	Recipient     string `json:"recipient"`
+	Selected      bool   `json:"selected"`
+	WrapNonceHex  string `json:"wrap_nonce_hex"`
+	WrappedDEKHex string `json:"wrapped_dek_hex"`
 }
 
 type contextKey string
 
-const requestIDKey contextKey = "request-id"
+const (
+	requestIDKey            contextKey = "request-id"
+	readAuthorizationHeader            = "X-Demo-Read-Authorization"
+)
 
 func NewHandler(identityDir, grpcAddr string, logger *slog.Logger) (http.Handler, error) {
 	if logger == nil {
@@ -66,6 +123,7 @@ func NewHandler(identityDir, grpcAddr string, logger *slog.Logger) (http.Handler
 		{ID: "customer3", Label: "Customer 3", Role: "customer", Read: []string{"C003"}, Update: []string{"C003"}},
 		{ID: "backoffice1", Label: "Back office 1", Role: "backoffice", Read: []string{"C001", "C002"}, Update: []string{}},
 		{ID: "backoffice2", Label: "Back office 2", Role: "backoffice", Read: []string{"C002", "C003"}, Update: []string{}},
+		{ID: "rotation", Label: "Rotation service (privileged)", Role: "rotation", Read: []string{"C001", "C002", "C003"}, Update: []string{}},
 	}
 	byID := make(map[string]Identity, len(identities))
 	for _, identity := range identities {
@@ -111,7 +169,7 @@ func (s *server) config(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"identities": s.identities,
 		"objects":    s.objects,
-		"warning":    "Local educational demo: selecting an identity impersonates it using credentials stored by this gateway.",
+		"warning":    "Local educational demo: selecting an identity, including the privileged rotation service, impersonates it using credentials stored by this gateway.",
 	})
 }
 
@@ -130,9 +188,33 @@ func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.Close()
-	o, plain, e := a.Read(object, 0)
+	bypassAuthorization := readAuthorizationBypassed(r)
+	a.BypassReadAuthorization = bypassAuthorization
+	snapshot, e := a.FetchSnapshot(object, 0)
 	if e != nil {
-		s.operationError(w, r, "read", identity.ID, object, e)
+		s.operationError(w, r, "fetch", identity.ID, object, e)
+		return
+	}
+	response := recordResponse{
+		Actor:             identity.ID,
+		ObjectID:          object,
+		Version:           snapshot.Version,
+		CanUpdate:         contains(identity.Update, object),
+		AuthorizationMode: readAuthorizationMode(r),
+		DatabaseStored:    formatStoredJSON(snapshot.Stored),
+		KeyMaterial:       describeKeyMaterial(snapshot.Data, identity.ID, nil),
+		ProcessTrace:      describeProcessTrace(snapshot.Data, len(snapshot.Stored), identity.ID, readAuthorizationMode(r), "read", nil, nil, ""),
+	}
+	plain, cryptoTrace, e := a.DecryptWithTrace(snapshot.Data)
+	if e != nil && bypassAuthorization {
+		response.DecryptionError = decryptionFailure(identity.ID, object, e)
+		response.ProcessTrace = describeProcessTrace(snapshot.Data, len(snapshot.Stored), identity.ID, response.AuthorizationMode, "read", nil, nil, response.DecryptionError)
+		s.logger.Info("ciphertext read but decryption blocked", "request_id", requestID(r), "actor", identity.ID, "object", object, "version", snapshot.Version, "read_authorization", response.AuthorizationMode, "reason", e.Error())
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	if e != nil {
+		s.operationError(w, r, "decrypt", identity.ID, object, e)
 		return
 	}
 	data, e := decodeRecord(plain)
@@ -140,8 +222,12 @@ func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
 		s.operationError(w, r, "decode", identity.ID, object, e)
 		return
 	}
-	s.logger.Info("record read", "request_id", requestID(r), "actor", identity.ID, "object", object, "version", o.Version)
-	writeJSON(w, http.StatusOK, recordResponse{Actor: identity.ID, ObjectID: object, Version: o.Version, CanUpdate: contains(identity.Update, object), Data: data})
+	response.Decrypted = true
+	response.Data = data
+	response.KeyMaterial = describeKeyMaterial(snapshot.Data, identity.ID, cryptoTrace.DEK)
+	response.ProcessTrace = describeProcessTrace(snapshot.Data, len(snapshot.Stored), identity.ID, response.AuthorizationMode, "read", &cryptoTrace, plain, "")
+	s.logger.Info("record read", "request_id", requestID(r), "actor", identity.ID, "object", object, "version", snapshot.Version, "read_authorization", response.AuthorizationMode)
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *server) updateRecord(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +237,10 @@ func (s *server) updateRecord(w http.ResponseWriter, r *http.Request) {
 	}
 	object, ok := s.requireObject(w, r)
 	if !ok {
+		return
+	}
+	if !contains(identity.Update, object) {
+		writeError(w, http.StatusForbidden, "only the customer who owns the record can update it")
 		return
 	}
 	contentType, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -188,8 +278,29 @@ func (s *server) updateRecord(w http.ResponseWriter, r *http.Request) {
 		s.operationError(w, r, "decode", identity.ID, object, e)
 		return
 	}
+	snapshot, e := a.FetchSnapshot(object, version)
+	if e != nil {
+		s.operationError(w, r, "fetch updated record", identity.ID, object, e)
+		return
+	}
+	verifiedPlain, cryptoTrace, e := a.DecryptWithTrace(snapshot.Data)
+	if e != nil {
+		s.operationError(w, r, "unwrap updated DEK", identity.ID, object, e)
+		return
+	}
 	s.logger.Info("record updated", "request_id", requestID(r), "actor", identity.ID, "object", object, "version", version, "fields", sortedKeys(input.Changes))
-	writeJSON(w, http.StatusOK, recordResponse{Actor: identity.ID, ObjectID: object, Version: version, CanUpdate: contains(identity.Update, object), Data: data})
+	writeJSON(w, http.StatusOK, recordResponse{
+		Actor:             identity.ID,
+		ObjectID:          object,
+		Version:           version,
+		CanUpdate:         contains(identity.Update, object),
+		AuthorizationMode: "enforced",
+		DatabaseStored:    formatStoredJSON(snapshot.Stored),
+		Decrypted:         true,
+		Data:              data,
+		KeyMaterial:       describeKeyMaterial(snapshot.Data, identity.ID, cryptoTrace.DEK),
+		ProcessTrace:      describeProcessTrace(snapshot.Data, len(snapshot.Stored), identity.ID, "enforced", "update", &cryptoTrace, verifiedPlain, ""),
+	})
 }
 
 func (s *server) requireIdentity(w http.ResponseWriter, r *http.Request) (Identity, bool) {
@@ -254,7 +365,7 @@ func (s *server) logRequests(next http.Handler) http.Handler {
 			if e != nil {
 				host = r.RemoteAddr
 			}
-			s.logger.Info("http request", "request_id", id, "method", r.Method, "path", r.URL.Path, "actor", r.Header.Get("X-Demo-Identity"), "status", recorder.status, "bytes", recorder.bytes, "duration", time.Since(started).Round(time.Microsecond), "remote", host)
+			s.logger.Info("http request", "request_id", id, "method", r.Method, "path", r.URL.Path, "actor", r.Header.Get("X-Demo-Identity"), "read_authorization", readAuthorizationMode(r), "status", recorder.status, "bytes", recorder.bytes, "duration", time.Since(started).Round(time.Microsecond), "remote", host)
 		}()
 		next.ServeHTTP(recorder, r)
 	})
@@ -288,6 +399,119 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 func requestID(r *http.Request) string {
 	id, _ := r.Context().Value(requestIDKey).(string)
 	return id
+}
+
+func readAuthorizationBypassed(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get(readAuthorizationHeader)), "disabled")
+}
+
+func readAuthorizationMode(r *http.Request) string {
+	if readAuthorizationBypassed(r) {
+		return "bypassed"
+	}
+	return "enforced"
+}
+
+func decryptionFailure(actor, object string, e error) string {
+	if strings.Contains(e.Error(), "no recipient envelope") || strings.Contains(e.Error(), "missing envelope") {
+		return fmt.Sprintf("%s received ciphertext for %s but has no recipient envelope, so its data-encryption key remains unavailable", actor, object)
+	}
+	return "the selected identity received ciphertext but could not decrypt it: " + e.Error()
+}
+
+func describeKeyMaterial(object core.Object, actor string, dek []byte) keyMaterial {
+	recipients := make([]string, 0, len(object.Envelopes))
+	for recipient := range object.Envelopes {
+		recipients = append(recipients, recipient)
+	}
+	sort.Strings(recipients)
+	result := keyMaterial{RecipientDEKs: make([]recipientEnvelope, 0, len(recipients))}
+	if len(dek) > 0 {
+		result.DEKHex = hex.EncodeToString(dek)
+		result.RecoveredBy = actor
+	}
+	for _, recipient := range recipients {
+		envelope := object.Envelopes[recipient]
+		result.RecipientDEKs = append(result.RecipientDEKs, recipientEnvelope{
+			Recipient:     recipient,
+			Selected:      recipient == actor,
+			WrapNonceHex:  hex.EncodeToString(envelope.Nonce),
+			WrappedDEKHex: hex.EncodeToString(envelope.Wrapped),
+		})
+	}
+	return result
+}
+
+func describeProcessTrace(object core.Object, storedBytes int, actor, authorizationMode, operation string, cryptoTrace *core.DecryptionTrace, plaintext []byte, stopReason string) processTrace {
+	recipients := make([]string, 0, len(object.Envelopes))
+	for recipient := range object.Envelopes {
+		recipients = append(recipients, recipient)
+	}
+	sort.Strings(recipients)
+
+	decision := "read ACL granted"
+	if authorizationMode == "bypassed" {
+		decision = "read ACL bypassed for this demo; authentication still passed"
+	}
+	if operation == "update" {
+		decision = "owner update accepted; the new encrypted version was fetched with read ACL enforced"
+	}
+
+	result := processTrace{
+		Status:                "database-returned",
+		Operation:             operation,
+		Actor:                 actor,
+		ObjectID:              object.ID,
+		Version:               object.Version,
+		AuthorizationMode:     authorizationMode,
+		Authenticated:         true,
+		AuthorizationDecision: decision,
+		DatabaseRead:          true,
+		StoredJSONBytes:       storedBytes,
+		CiphertextBytes:       len(object.Ciphertext),
+		RecordNonceHex:        hex.EncodeToString(object.Nonce),
+		Recipients:            recipients,
+		RecordAADHex:          hex.EncodeToString(core.AAD(object.ID, object.Version, "")),
+		StopReason:            stopReason,
+	}
+	if envelope, ok := object.Envelopes[actor]; ok {
+		result.EnvelopeFound = true
+		result.EnvelopeRecipient = actor
+		result.EphemeralPointHex = pointHex(envelope.R)
+		result.WrapNonceHex = hex.EncodeToString(envelope.Nonce)
+		result.WrappedDEKHex = hex.EncodeToString(envelope.Wrapped)
+		result.EnvelopeAADHex = hex.EncodeToString(core.AAD(object.ID, object.Version, actor))
+	}
+	if stopReason != "" {
+		result.Status = "blocked"
+		return result
+	}
+	if cryptoTrace == nil {
+		return result
+	}
+	result.Status = "completed"
+	result.ServerPartialPointHex = pointHex(cryptoTrace.ServerPartial)
+	result.ClientPartialPointHex = pointHex(cryptoTrace.ClientPartial)
+	result.CombinedSharedPointHex = pointHex(cryptoTrace.CombinedShared)
+	result.KeyEncryptionKeyHex = hex.EncodeToString(cryptoTrace.KeyEncryptionKey)
+	result.DEKHex = hex.EncodeToString(cryptoTrace.DEK)
+	result.PlaintextBytes = len(plaintext)
+	return result
+}
+
+func pointHex(point core.Point) string {
+	if !core.Valid(point) {
+		return ""
+	}
+	return hex.EncodeToString(elliptic.Marshal(elliptic.P256(), point.X, point.Y))
+}
+
+func formatStoredJSON(raw json.RawMessage) string {
+	var formatted bytes.Buffer
+	if e := json.Indent(&formatted, raw, "", "  "); e != nil {
+		return string(raw)
+	}
+	return formatted.String()
 }
 
 func decodeRecord(plain []byte) (map[string]any, error) {

@@ -23,8 +23,9 @@ type Identity struct {
 	Secret []byte `json:"secret"`
 }
 type Agent struct {
-	ID   Identity
-	Conn *grpc.ClientConn
+	ID                      Identity
+	Conn                    *grpc.ClientConn
+	BypassReadAuthorization bool
 }
 
 func Connect(path, addr string) (*Agent, error) {
@@ -40,7 +41,7 @@ func Connect(path, addr string) (*Agent, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &Agent{id, c}, nil
+	return &Agent{ID: id, Conn: c}, nil
 }
 func (a *Agent) Close() { a.Conn.Close() }
 func (a *Agent) Call(op string, req any, out any) error {
@@ -50,7 +51,11 @@ func (a *Agent) Call(op string, req any, out any) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("client-id", a.ID.ID, "authorization", a.ID.Token))
+	metadataPairs := []string{"client-id", a.ID.ID, "authorization", a.ID.Token}
+	if a.BypassReadAuthorization {
+		metadataPairs = append(metadataPairs, service.ReadAuthorizationMetadata, "disabled")
+	}
+	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs(metadataPairs...))
 	return protocol.Invoke(ctx, a.Conn, op, &protocol.Request{Payload: b}, out)
 }
 func (a *Agent) Publics(obj string) (map[string]core.Point, error) {
@@ -70,9 +75,13 @@ func (a *Agent) Publics(obj string) (map[string]core.Point, error) {
 	return out, nil
 }
 func (a *Agent) Fetch(obj string, v uint64) (core.Object, error) {
+	snap, e := a.FetchSnapshot(obj, v)
+	return snap.Data, e
+}
+func (a *Agent) FetchSnapshot(obj string, v uint64) (service.Snapshot, error) {
 	var snap service.Snapshot
 	e := a.Call("fetch", service.ObjectArgs{Object: obj, Version: v}, &snap)
-	return snap.Data, e
+	return snap, e
 }
 func (a *Agent) Read(obj string, v uint64) (core.Object, []byte, error) {
 	o, e := a.Fetch(obj, v)
@@ -100,18 +109,34 @@ func (a *Agent) Partial(obj core.Object) (core.Point, error) {
 	return p, nil
 }
 func (a *Agent) Decrypt(obj core.Object) ([]byte, error) {
+	plain, _, e := a.DecryptWithDEK(obj)
+	return plain, e
+}
+func (a *Agent) DecryptWithDEK(obj core.Object) ([]byte, []byte, error) {
+	plain, trace, e := a.DecryptWithTrace(obj)
+	return plain, trace.DEK, e
+}
+func (a *Agent) DecryptWithTrace(obj core.Object) ([]byte, core.DecryptionTrace, error) {
 	p, e := a.Partial(obj)
 	if e != nil {
-		return nil, e
+		return nil, core.DecryptionTrace{}, e
 	}
-	return a.Final(obj, p)
+	return a.FinalWithTrace(obj, p)
 }
 func (a *Agent) Final(obj core.Object, p core.Point) ([]byte, error) {
+	plain, _, e := a.FinalWithDEK(obj, p)
+	return plain, e
+}
+func (a *Agent) FinalWithDEK(obj core.Object, p core.Point) ([]byte, []byte, error) {
+	plain, trace, e := a.FinalWithTrace(obj, p)
+	return plain, trace.DEK, e
+}
+func (a *Agent) FinalWithTrace(obj core.Object, p core.Point) ([]byte, core.DecryptionTrace, error) {
 	n := new(big.Int).SetBytes(a.ID.Secret)
 	if n.Sign() == 0 {
-		return nil, errors.New("empty private share")
+		return nil, core.DecryptionTrace{}, errors.New("empty private share")
 	}
-	return core.Final(obj, core.Client{ID: a.ID.ID, Secret: n}, p)
+	return core.FinalWithTrace(obj, core.Client{ID: a.ID.ID, Secret: n}, p)
 }
 func (a *Agent) Upload(obj core.Object) error {
 	var r service.Empty
